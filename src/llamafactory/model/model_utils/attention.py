@@ -76,11 +76,23 @@ def configure_attn_implementation(config: "PretrainedConfig", model_args: "Model
         requested_attn_implementation = "sdpa"
     elif model_args.flash_attn == AttentionFunction.FA2:
         from transformers import is_torch_npu_available
+        from transformers.utils import is_kernels_available
 
-        if not (is_flash_attn_2_available() or is_torch_npu_available()):
-            logger.warning_rank0("FlashAttention-2 is not installed.")
-            return
+        has_native_fa2 = is_flash_attn_2_available() or is_torch_npu_available()
+        if not (has_native_fa2 or is_kernels_available()):
+            raise ImportError(
+                "FlashAttention-2 was requested, but neither the native `flash-attn` package nor the "
+                "Transformers Hub-kernel backend is available. Install `flash-attn` or `kernels`."
+            )
 
+        if not has_native_fa2:
+            logger.info_rank0(
+                "Native FlashAttention-2 is not installed; Transformers will use the "
+                "`kernels-community/flash-attn2` Hub kernel."
+            )
+
+        # Keep the canonical request here. Transformers validates model support and,
+        # when native flash-attn is unavailable, resolves it to the actual Hub kernel.
         requested_attn_implementation = "flash_attention_2"
     elif model_args.flash_attn == AttentionFunction.FA3:
         from transformers.utils import is_flash_attn_3_available
@@ -115,7 +127,7 @@ def print_attn_implementation(config: "PretrainedConfig") -> None:
     else:
         attn_implementation = getattr(config, "_attn_implementation", None)
 
-    if attn_implementation == "flash_attention_2":
+    if attn_implementation in ("flash_attention_2", "kernels-community/flash-attn2"):
         logger.info_rank0("Using FlashAttention-2 for faster training and inference.")
     elif attn_implementation == "flash_attention_3":
         logger.info_rank0("Using FlashAttention-3 for faster training and inference.")

@@ -13,8 +13,11 @@
 # limitations under the License.
 
 import os
+from types import SimpleNamespace
 
 import pytest
+import transformers
+from transformers import LlamaConfig
 from transformers.utils import is_flash_attn_2_available
 
 
@@ -27,7 +30,9 @@ except ImportError:
         return True
 
 
+from llamafactory.extras.constants import AttentionFunction
 from llamafactory.extras.packages import is_transformers_version_greater_than
+from llamafactory.model.model_utils.attention import configure_attn_implementation
 from llamafactory.train.test_utils import load_infer_model
 
 
@@ -37,6 +42,27 @@ INFER_ARGS = {
     "model_name_or_path": TINY_LLAMA3,
     "template": "llama3",
 }
+
+
+def test_configure_fa2_allows_transformers_hub_kernel(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(transformers.utils, "is_flash_attn_2_available", lambda: False)
+    monkeypatch.setattr(transformers.utils, "is_kernels_available", lambda: True)
+    monkeypatch.setattr(transformers, "is_torch_npu_available", lambda: False)
+    config = LlamaConfig()
+
+    configure_attn_implementation(config, SimpleNamespace(flash_attn=AttentionFunction.FA2))
+
+    assert config._attn_implementation == "flash_attention_2"
+
+
+def test_configure_fa2_fails_without_backend(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(transformers.utils, "is_flash_attn_2_available", lambda: False)
+    monkeypatch.setattr(transformers.utils, "is_kernels_available", lambda: False)
+    monkeypatch.setattr(transformers, "is_torch_npu_available", lambda: False)
+    config = LlamaConfig()
+
+    with pytest.raises(ImportError, match="neither the native `flash-attn` package nor the Transformers Hub-kernel"):
+        configure_attn_implementation(config, SimpleNamespace(flash_attn=AttentionFunction.FA2))
 
 
 @pytest.mark.xfail(is_transformers_version_greater_than("4.48"), reason="Attention refactor.")
