@@ -91,6 +91,8 @@ class SupervisedDatasetProcessor(DatasetProcessor):
                 target_label = [IGNORE_INDEX] * target_len
             else:
                 target_label = target_ids
+            if self.data_args.mask_reasoning_span and target_label is target_ids:
+                target_label = self._mask_span(target_ids, "<reasoning>", "</reasoning>")
 
             if self.data_args.mask_history:  # reversed sequences
                 input_ids = source_ids + target_ids + input_ids
@@ -104,6 +106,25 @@ class SupervisedDatasetProcessor(DatasetProcessor):
             labels += [self.tokenizer.eos_token_id]
 
         return input_ids, labels
+
+    def _mask_span(self, target_ids: list[int], open_tag: str, close_tag: str) -> list[int]:
+        """Labels = target_ids with the tokens strictly between ``open_tag`` and ``close_tag`` set to IGNORE_INDEX.
+        Token boundaries come from incremental decoding, so the tags' own tokens (and the text around) stay supervised."""
+        ends, text = [], ""
+        for k in range(len(target_ids)):
+            text = self.tokenizer.decode(target_ids[: k + 1], skip_special_tokens=False)
+            ends.append(len(text))
+        a = text.find(open_tag)
+        b = text.find(close_tag, a + len(open_tag)) if a >= 0 else -1
+        if a < 0 or b < 0:
+            return list(target_ids)
+        lo, hi = a + len(open_tag), b
+        labels, start = list(target_ids), 0
+        for k, end in enumerate(ends):
+            if start >= lo and end <= hi:          # token lies entirely inside the reasoning content
+                labels[k] = IGNORE_INDEX
+            start = end
+        return labels
 
     def preprocess_dataset(self, examples: dict[str, list[Any]]) -> dict[str, list[Any]]:
         # build inputs with format `<bos> X Y <eos>` and labels with format `<ignore> ... <ignore> Y <eos>`

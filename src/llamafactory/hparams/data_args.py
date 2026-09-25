@@ -55,6 +55,11 @@ class DataArguments:
         default=False,
         metadata={"help": "Whether or not to mask the history and train on the last turn only."},
     )
+    mask_reasoning_span: bool = field(
+        default=False,
+        metadata={"help": "Mask the content between <reasoning> and </reasoning> in trained responses from the loss "
+                  "(the tags themselves stay supervised): the reasoning is model-owned, only the other sections are targets."},
+    )
     streaming: bool = field(
         default=False,
         metadata={"help": "Enable dataset streaming."},
