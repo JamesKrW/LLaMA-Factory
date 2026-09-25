@@ -28,6 +28,9 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 MAX_SU_SEQ_IDX = 2**32  # maximum sub-sequence index
+# A response that starts with this marker is a perception-only sample: the marker is removed and the content of its
+# <answer>...</answer> is masked from the loss (the executed action of an on-policy state is context, not a target).
+NOLOSS_ANSWER_MARKER = "[[NOLOSS_ANSWER]]"
 
 
 @dataclass
@@ -58,6 +61,7 @@ class SupervisedDatasetProcessor(DatasetProcessor):
         images: list["ImageInput"],
         videos: list["VideoInput"],
         audios: list["AudioInput"],
+        noloss_answer: bool = False,
     ) -> tuple[list[int], list[int]]:
         messages = self.template.mm_plugin.process_messages(prompt + response, images, videos, audios, self.processor)
         input_ids, labels = self.template.mm_plugin.process_token_ids(
@@ -91,8 +95,11 @@ class SupervisedDatasetProcessor(DatasetProcessor):
                 target_label = [IGNORE_INDEX] * target_len
             else:
                 target_label = target_ids
-            if self.data_args.mask_reasoning_span and target_label is target_ids:
-                target_label = self._mask_span(target_ids, "<reasoning>", "</reasoning>")
+            if target_label is target_ids and (self.data_args.mask_reasoning_span or noloss_answer):
+                if self.data_args.mask_reasoning_span:
+                    target_label = self._mask_span(target_label, "<reasoning>", "</reasoning>", target_ids)
+                if noloss_answer:
+                    target_label = self._mask_span(target_label, "<answer>", "</answer>", target_ids)
 
             if self.data_args.mask_history:  # reversed sequences
                 input_ids = source_ids + target_ids + input_ids
@@ -107,9 +114,10 @@ class SupervisedDatasetProcessor(DatasetProcessor):
 
         return input_ids, labels
 
-    def _mask_span(self, target_ids: list[int], open_tag: str, close_tag: str) -> list[int]:
+    def _mask_span(self, labels_in: list[int], open_tag: str, close_tag: str, target_ids: list[int] = None) -> list[int]:
         """Labels = target_ids with the tokens strictly between ``open_tag`` and ``close_tag`` set to IGNORE_INDEX.
         Token boundaries come from incremental decoding, so the tags' own tokens (and the text around) stay supervised."""
+        target_ids = labels_in if target_ids is None else target_ids
         ends, text = [], ""
         for k in range(len(target_ids)):
             text = self.tokenizer.decode(target_ids[: k + 1], skip_special_tokens=False)
@@ -117,9 +125,9 @@ class SupervisedDatasetProcessor(DatasetProcessor):
         a = text.find(open_tag)
         b = text.find(close_tag, a + len(open_tag)) if a >= 0 else -1
         if a < 0 or b < 0:
-            return list(target_ids)
+            return list(labels_in)
         lo, hi = a + len(open_tag), b
-        labels, start = list(target_ids), 0
+        labels, start = list(labels_in), 0
         for k, end in enumerate(ends):
             if start >= lo and end <= hi:          # token lies entirely inside the reasoning content
                 labels[k] = IGNORE_INDEX
@@ -137,14 +145,19 @@ class SupervisedDatasetProcessor(DatasetProcessor):
                 )
                 continue
 
+            response = examples["_response"][i]
+            noloss = bool(response) and response[0]["content"].startswith(NOLOSS_ANSWER_MARKER)
+            if noloss:
+                response = [{**response[0], "content": response[0]["content"][len(NOLOSS_ANSWER_MARKER):]}]
             input_ids, labels = self._encode_data_example(
                 prompt=examples["_prompt"][i],
-                response=examples["_response"][i],
+                response=response,
                 system=examples["_system"][i],
                 tools=examples["_tools"][i],
                 images=examples["_images"][i] or [],
                 videos=examples["_videos"][i] or [],
                 audios=examples["_audios"][i] or [],
+                noloss_answer=noloss,
             )
             model_inputs["input_ids"].append(input_ids)
             model_inputs["attention_mask"].append([1] * len(input_ids))
